@@ -26,14 +26,11 @@ name_re = re.compile(r"^(\d+)\.pdf$", re.IGNORECASE)
 # --- Страницы ---
 @app.get("/", include_in_schema=False)
 async def root():
-    # редиректим сразу на форму
     return RedirectResponse(url="/merge-zip", status_code=302)
 
 @app.get("/merge-zip", response_class=HTMLResponse)
 async def merge_zip_form():
-    # Простая форма с полем X-API-Key и загрузкой ZIP
-    # Поле названо x_api_key (подчёркивание), чтобы аккуратно принять его как Form-параметр;
-    # По сути это то же самое поле "X-API-Key".
+    # Форма с полем X-API-Key — имя поля ДОЛЖНО совпадать с параметром Form ниже: x_api_key
     return """
     <html>
       <body>
@@ -62,7 +59,7 @@ async def merge_zip_form():
 async def status():
     return {"status": "ok", "version": APP_VERSION}
 
-# --- Безопасность (ручная, без принудительного вызова BasicAuth, чтобы не триггерить браузер) ---
+# --- Безопасность (ручная; не триггерим BasicAuth, если REQUIRE_BASIC=false) ---
 def check_api_key(provided: str | None):
     if REQUIRE_API_KEY:
         if not API_KEY or not provided or not secrets.compare_digest(provided, API_KEY):
@@ -85,13 +82,18 @@ def check_basic_auth(auth_header: str | None):
         return
     creds = parse_basic_auth(auth_header)
     if not (creds and BASIC_USER and BASIC_PASS):
-        # Явно просим базовую авторизацию только если она включена
-        raise HTTPException(status_code=401, detail="Basic auth required",
-                            headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'})
+        raise HTTPException(
+            status_code=401,
+            detail="Basic auth required",
+            headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'}
+        )
     user, pwd = creds
     if not (secrets.compare_digest(user, BASIC_USER) and secrets.compare_digest(pwd, BASIC_PASS)):
-        raise HTTPException(status_code=401, detail="Invalid credentials",
-                            headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'})
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'}
+        )
 
 # --- Утилиты ZIP ---
 def zipfile_is_valid(path: str) -> bool:
@@ -126,17 +128,17 @@ def scan_zip(zf: zipfile.ZipFile) -> Tuple[List[Tuple[int, str]], int]:
 async def merge_zip(
     request: Request,
     zipfile: UploadFile = File(...),
-    x_api_key_form: str | None = Form(default=None),  # поле из формы
-    x_api_key_header: str | None = Header(default=None, alias="X-API-Key"),  # заголовок
+    x_api_key: str | None = Form(default=None),  # <— ВАЖНО: имя совпадает с полем формы
+    x_api_key_header: str | None = Header(default=None, alias="X-API-Key"),
 ):
-    # 1) Проверяем Basic Auth ТОЛЬКО если она включена
+    # 1) BasicAuth только если включен
     check_basic_auth(request.headers.get("authorization"))
 
-    # 2) Проверяем API-ключ (берём из заголовка или из формы)
-    provided_key = x_api_key_header or x_api_key_form
+    # 2) API-ключ: берём из заголовка или из формы
+    provided_key = x_api_key_header or x_api_key
     check_api_key(provided_key)
 
-    # 3) Проверка контента и размера запроса
+    # 3) Проверка входа
     if zipfile.content_type not in ("application/zip", "application/x-zip-compressed", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Ожидался ZIP-файл")
 
@@ -190,7 +192,6 @@ async def merge_zip(
                     media_type="application/pdf",
                     headers={"Content-Disposition": 'attachment; filename="merged.pdf"'},
                 )
-                # Доп. security-заголовки
                 resp.headers["X-Content-Type-Options"] = "nosniff"
                 resp.headers["X-Frame-Options"] = "DENY"
                 resp.headers["Referrer-Policy"] = "no-referrer"
