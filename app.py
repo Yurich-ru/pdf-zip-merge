@@ -34,9 +34,13 @@ async def index():
     </body></html>
     """
 
+# вверху рядом с другими настройками
+APP_VERSION = os.getenv("APP_VERSION", "v0.1.0")
+
+# обновите обработчик /status:
 @app.get("/status")
 async def status():
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 # --- Безопасность: API key и/или BasicAuth ---
 def check_api_key(x_api_key: str | None) -> None:
