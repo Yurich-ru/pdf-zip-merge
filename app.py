@@ -5,7 +5,7 @@ from typing import List, Tuple
 import os, re, tempfile, zipfile, secrets
 import httpx
 
-# --- Настройки из окружения ---
+# --- Настройки из окружения --- 
 STIRLING_BASE_URL = os.getenv("STIRLING_BASE_URL", "http://stirling-pdf:8080")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
 ALLOWED_COUNT = int(os.getenv("ALLOWED_COUNT", "500"))
