@@ -4,17 +4,18 @@ from typing import List, Tuple
 import os, re, tempfile, zipfile, secrets, base64
 import httpx
 
-# --- Настройки из окружения ---
+# --- Настройки окружения ---
 STIRLING_BASE_URL = os.getenv("STIRLING_BASE_URL", "http://stirling-pdf:8080")
-STIRLING_API_KEY = os.getenv("STIRLING_API_KEY", "")  # <— НОВОЕ: ключ для API Stirling-PDF (если включена проверка)
+STIRLING_API_KEY  = os.getenv("STIRLING_API_KEY", "")  # Ключ для Stirling-PDF -> X-API-KEY
+
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
 ALLOWED_COUNT = int(os.getenv("ALLOWED_COUNT", "500"))
 MAX_TOTAL_UNZIPPED_MB = int(os.getenv("MAX_TOTAL_UNZIPPED_MB", "500"))
 
-REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "true").lower() in ("1", "true", "yes")
+REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "true").lower() in ("1","true","yes")
 API_KEY = os.getenv("API_KEY", "")
 
-REQUIRE_BASIC = os.getenv("REQUIRE_BASIC", "false").lower() in ("1", "true", "yes")
+REQUIRE_BASIC = os.getenv("REQUIRE_BASIC", "false").lower() in ("1","true","yes")
 BASIC_USER = os.getenv("BASIC_USER", "")
 BASIC_PASS = os.getenv("BASIC_PASS", "")
 
@@ -31,7 +32,7 @@ async def root():
 
 @app.get("/merge-zip", response_class=HTMLResponse)
 async def merge_zip_form():
-    return """
+    return f"""
     <html>
       <body>
         <h3>Объединение PDF из ZIP</h3>
@@ -42,14 +43,14 @@ async def merge_zip_form():
           </div>
           <div style="margin-top:8px;">
             <label>X-API-Key:</label><br/>
-            <input type="password" name="x_api_key" placeholder="введите API-ключ (или пришлите заголовком X-API-Key)" />
+            <input type="password" name="x_api_key" placeholder="введите API-ключ (или пришлите заголовком X-API-KEY)" />
           </div>
           <div style="margin-top:12px;">
             <button type="submit">Объединить</button>
           </div>
         </form>
         <p style="margin-top:12px;font-size:12px;color:#666;">
-          Версия: """ + APP_VERSION + """.
+          Версия: {APP_VERSION}.
         </p>
       </body>
     </html>
@@ -59,7 +60,7 @@ async def merge_zip_form():
 async def status():
     return {"status": "ok", "version": APP_VERSION}
 
-# --- Вспомогательная безопасная сравнилка (работает с не-ASCII) ---
+# --- Безопасные утилиты сравнения/авторизации ---
 def safe_equals(a, b) -> bool:
     if a is None or b is None:
         return False
@@ -68,15 +69,6 @@ def safe_equals(a, b) -> bool:
     if not isinstance(b, (bytes, bytearray)):
         b = str(b).encode("utf-8", "ignore")
     return secrets.compare_digest(a, b)
-
-# --- Безопасность (не триггерим Basic, если выключен) ---
-def check_api_key(provided: str | None):
-    if REQUIRE_API_KEY:
-        # нормализуем пробелы вокруг ключа
-        provided = (provided or "").strip()
-        expected = (API_KEY or "").strip()
-        if not expected or not safe_equals(provided, expected):
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 def parse_basic_auth(auth_header: str | None) -> tuple[str, str] | None:
     if not auth_header or not auth_header.startswith("Basic "):
@@ -108,7 +100,14 @@ def check_basic_auth(auth_header: str | None):
             headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'}
         )
 
-# --- ZIP утилиты ---
+def check_api_key(provided: str | None):
+    if REQUIRE_API_KEY:
+        provided = (provided or "").strip()
+        expected = (API_KEY or "").strip()
+        if not expected or not safe_equals(provided, expected):
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+# --- Утилиты ZIP ---
 def zipfile_is_valid(path: str) -> bool:
     try:
         with zipfile.ZipFile(path, "r") as zf:
@@ -122,7 +121,6 @@ def scan_zip(zf: zipfile.ZipFile) -> Tuple[List[Tuple[int, str]], int]:
     candidates: List[Tuple[int, str]] = []
     total_unzipped = 0
     seen_numbers = set()
-
     for m in members:
         base = os.path.basename(m)
         m1 = name_re.match(base)
@@ -140,18 +138,18 @@ def scan_zip(zf: zipfile.ZipFile) -> Tuple[List[Tuple[int, str]], int]:
 @app.post("/merge-zip")
 async def merge_zip(
     request: Request,
-    zip_file: UploadFile = File(..., alias="zipfile"),  # ВАЖНО: не перекрывает модуль zipfile
+    zip_file: UploadFile = File(..., alias="zipfile"),  # alias совпадает с name в HTML
     x_api_key: str | None = Form(default=None),
-    x_api_key_header: str | None = Header(default=None, alias="X-API-Key"),
+    x_api_key_header: str | None = Header(default=None, alias="X-API-KEY"),
 ):
-    # 1) BasicAuth только если включен
+    # 1) BasicAuth только если включена переменной окружения
     check_basic_auth(request.headers.get("authorization"))
 
-    # 2) API-ключ: заголовок или форма
+    # 2) Внешняя защита API-ключом (заголовок или форма)
     provided_key = (x_api_key_header or x_api_key or "").strip()
     check_api_key(provided_key)
 
-    # 3) Проверка входа
+    # 3) Валидация входного файла
     if zip_file.content_type not in ("application/zip", "application/x-zip-compressed", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Ожидался ZIP-файл")
 
@@ -170,7 +168,6 @@ async def merge_zip(
             candidates, total_unzipped = scan_zip(zf)
             if not candidates:
                 raise HTTPException(status_code=400, detail="В ZIP нет файлов 1.pdf, 2.pdf, ...")
-
             if len(candidates) > ALLOWED_COUNT:
                 raise HTTPException(status_code=400, detail=f"Слишком много файлов (> {ALLOWED_COUNT})")
 
@@ -188,15 +185,14 @@ async def merge_zip(
                         dst.write(src.read())
                     extracted_paths.append(target)
 
+                # Собираем запрос к Stirling-PDF
                 files = [("fileInput", (os.path.basename(p), open(p, "rb"), "application/pdf")) for p in extracted_paths]
                 data = {"sortType": "orderProvided"}
-
-                # Заголовки для Stirling-PDF (если включена проверка apiKey в самом Stirling)
                 headers = {}
                 if STIRLING_API_KEY:
-                    headers["apiKey"] = STIRLING_API_KEY
+                    headers["X-API-KEY"] = STIRLING_API_KEY  # ВАЖНО: правильный заголовок
 
-                url = f"{STIRLING_BASE_URL}/api/v1/general/merge-pdfs"
+                url = f"{STIRLING_BASE_URL.rstrip('/')}/api/v1/general/merge-pdfs"
                 async with httpx.AsyncClient(timeout=120) as client:
                     try:
                         r = await client.post(url, files=files, data=data, headers=headers)
@@ -204,8 +200,8 @@ async def merge_zip(
                         for _, f in files:
                             f[1].close()
 
-                    if r.status_code != 200 or r.headers.get("content-type", "").split(";")[0] != "application/pdf":
-                        raise HTTPException(status_code=502, detail=f"Stirling-PDF error {r.status_code}: {r.text[:300]}")
+                if r.status_code != 200 or r.headers.get("content-type", "").split(";")[0] != "application/pdf":
+                    raise HTTPException(status_code=502, detail=f"Stirling-PDF error {r.status_code}: {r.text[:300]}")
 
                 pdf_bytes = r.content
                 resp = Response(
@@ -213,6 +209,7 @@ async def merge_zip(
                     media_type="application/pdf",
                     headers={"Content-Disposition": 'attachment; filename="merged.pdf"'},
                 )
+                # Доп. security-заголовки
                 resp.headers["X-Content-Type-Options"] = "nosniff"
                 resp.headers["X-Frame-Options"] = "DENY"
                 resp.headers["Referrer-Policy"] = "no-referrer"
