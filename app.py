@@ -6,9 +6,10 @@ import httpx
 
 # --- Настройки из окружения ---
 STIRLING_BASE_URL = os.getenv("STIRLING_BASE_URL", "http://stirling-pdf:8080")
+STIRLING_API_KEY = os.getenv("STIRLING_API_KEY", "")  # <— НОВОЕ: ключ для API Stirling-PDF (если включена проверка)
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
 ALLOWED_COUNT = int(os.getenv("ALLOWED_COUNT", "500"))
-MAX_TOTAL_UNZIPPED_MB = int(os.getenv("MAX_TOTAL_UNZIPPED_MB", "500"))  # защита от zip-бомбы
+MAX_TOTAL_UNZIPPED_MB = int(os.getenv("MAX_TOTAL_UNZIPPED_MB", "500"))
 
 REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "true").lower() in ("1", "true", "yes")
 API_KEY = os.getenv("API_KEY", "")
@@ -30,7 +31,6 @@ async def root():
 
 @app.get("/merge-zip", response_class=HTMLResponse)
 async def merge_zip_form():
-    # Форма с полем X-API-Key — имя поля ДОЛЖНО совпадать с параметром Form ниже: x_api_key
     return """
     <html>
       <body>
@@ -59,17 +59,30 @@ async def merge_zip_form():
 async def status():
     return {"status": "ok", "version": APP_VERSION}
 
-# --- Безопасность (ручная; не триггерим BasicAuth, если REQUIRE_BASIC=false) ---
+# --- Вспомогательная безопасная сравнилка (работает с не-ASCII) ---
+def safe_equals(a, b) -> bool:
+    if a is None or b is None:
+        return False
+    if not isinstance(a, (bytes, bytearray)):
+        a = str(a).encode("utf-8", "ignore")
+    if not isinstance(b, (bytes, bytearray)):
+        b = str(b).encode("utf-8", "ignore")
+    return secrets.compare_digest(a, b)
+
+# --- Безопасность (не триггерим Basic, если выключен) ---
 def check_api_key(provided: str | None):
     if REQUIRE_API_KEY:
-        if not API_KEY or not provided or not secrets.compare_digest(provided, API_KEY):
+        # нормализуем пробелы вокруг ключа
+        provided = (provided or "").strip()
+        expected = (API_KEY or "").strip()
+        if not expected or not safe_equals(provided, expected):
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 def parse_basic_auth(auth_header: str | None) -> tuple[str, str] | None:
     if not auth_header or not auth_header.startswith("Basic "):
         return None
     try:
-        raw = base64.b64decode(auth_header[6:]).decode("utf-8")
+        raw = base64.b64decode(auth_header[6:]).decode("utf-8", "ignore")
         if ":" not in raw:
             return None
         user, pwd = raw.split(":", 1)
@@ -88,14 +101,14 @@ def check_basic_auth(auth_header: str | None):
             headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'}
         )
     user, pwd = creds
-    if not (secrets.compare_digest(user, BASIC_USER) and secrets.compare_digest(pwd, BASIC_PASS)):
+    if not (safe_equals(user, BASIC_USER) and safe_equals(pwd, BASIC_PASS)):
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials",
             headers={"WWW-Authenticate": 'Basic realm="zip-merge", charset="UTF-8"'}
         )
 
-# --- Утилиты ZIP ---
+# --- ZIP утилиты ---
 def zipfile_is_valid(path: str) -> bool:
     try:
         with zipfile.ZipFile(path, "r") as zf:
@@ -127,8 +140,7 @@ def scan_zip(zf: zipfile.ZipFile) -> Tuple[List[Tuple[int, str]], int]:
 @app.post("/merge-zip")
 async def merge_zip(
     request: Request,
-    # ВАЖНО: не называем параметр `zipfile`, чтобы не затереть модуль `zipfile`
-    zip_file: UploadFile = File(..., alias="zipfile"),  # alias соответствует name="zipfile" в HTML-форме
+    zip_file: UploadFile = File(..., alias="zipfile"),  # ВАЖНО: не перекрывает модуль zipfile
     x_api_key: str | None = Form(default=None),
     x_api_key_header: str | None = Header(default=None, alias="X-API-Key"),
 ):
@@ -136,10 +148,10 @@ async def merge_zip(
     check_basic_auth(request.headers.get("authorization"))
 
     # 2) API-ключ: заголовок или форма
-    provided_key = x_api_key_header or x_api_key
+    provided_key = (x_api_key_header or x_api_key or "").strip()
     check_api_key(provided_key)
 
-    # 3) Валидация входного файла
+    # 3) Проверка входа
     if zip_file.content_type not in ("application/zip", "application/x-zip-compressed", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Ожидался ZIP-файл")
 
@@ -154,7 +166,6 @@ async def merge_zip(
         if not zipfile_is_valid(tmp_zip.name):
             raise HTTPException(status_code=400, detail="Некорректный ZIP")
 
-        # Здесь мы обращаемся к МОДУЛЮ `zipfile`, а не к параметру (который теперь `zip_file`)
         with zipfile.ZipFile(tmp_zip.name, "r") as zf:
             candidates, total_unzipped = scan_zip(zf)
             if not candidates:
@@ -180,15 +191,23 @@ async def merge_zip(
                 files = [("fileInput", (os.path.basename(p), open(p, "rb"), "application/pdf")) for p in extracted_paths]
                 data = {"sortType": "orderProvided"}
 
+                # Заголовки для Stirling-PDF (если включена проверка apiKey в самом Stirling)
+                headers = {}
+                if STIRLING_API_KEY:
+                    headers["apiKey"] = STIRLING_API_KEY
+
                 url = f"{STIRLING_BASE_URL}/api/v1/general/merge-pdfs"
                 async with httpx.AsyncClient(timeout=120) as client:
-                    r = await client.post(url, files=files, data=data)
-                    for _, f in files:
-                        f[1].close()
-                    if r.status_code != 200 or r.headers.get("content-type", "").split(";")[0] != "application/pdf":
-                        raise HTTPException(status_code=502, detail=f"Stirling-PDF вернул ошибку {r.status_code}: {r.text[:300]}")
-                    pdf_bytes = r.content
+                    try:
+                        r = await client.post(url, files=files, data=data, headers=headers)
+                    finally:
+                        for _, f in files:
+                            f[1].close()
 
+                    if r.status_code != 200 or r.headers.get("content-type", "").split(";")[0] != "application/pdf":
+                        raise HTTPException(status_code=502, detail=f"Stirling-PDF error {r.status_code}: {r.text[:300]}")
+
+                pdf_bytes = r.content
                 resp = Response(
                     content=pdf_bytes,
                     media_type="application/pdf",
@@ -202,4 +221,3 @@ async def merge_zip(
     finally:
         try: os.unlink(tmp_zip.name)
         except: pass
-
