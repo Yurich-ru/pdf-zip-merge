@@ -127,22 +127,23 @@ def scan_zip(zf: zipfile.ZipFile) -> Tuple[List[Tuple[int, str]], int]:
 @app.post("/merge-zip")
 async def merge_zip(
     request: Request,
-    zipfile: UploadFile = File(...),
-    x_api_key: str | None = Form(default=None),  # <— ВАЖНО: имя совпадает с полем формы
+    # ВАЖНО: не называем параметр `zipfile`, чтобы не затереть модуль `zipfile`
+    zip_file: UploadFile = File(..., alias="zipfile"),  # alias соответствует name="zipfile" в HTML-форме
+    x_api_key: str | None = Form(default=None),
     x_api_key_header: str | None = Header(default=None, alias="X-API-Key"),
 ):
     # 1) BasicAuth только если включен
     check_basic_auth(request.headers.get("authorization"))
 
-    # 2) API-ключ: берём из заголовка или из формы
+    # 2) API-ключ: заголовок или форма
     provided_key = x_api_key_header or x_api_key
     check_api_key(provided_key)
 
-    # 3) Проверка входа
-    if zipfile.content_type not in ("application/zip", "application/x-zip-compressed", "application/octet-stream"):
+    # 3) Валидация входного файла
+    if zip_file.content_type not in ("application/zip", "application/x-zip-compressed", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Ожидался ZIP-файл")
 
-    contents = await zipfile.read()
+    contents = await zip_file.read()
     size_mb = len(contents) / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
         raise HTTPException(status_code=413, detail=f"Слишком большой ZIP (> {MAX_UPLOAD_MB} MB)")
@@ -153,6 +154,7 @@ async def merge_zip(
         if not zipfile_is_valid(tmp_zip.name):
             raise HTTPException(status_code=400, detail="Некорректный ZIP")
 
+        # Здесь мы обращаемся к МОДУЛЮ `zipfile`, а не к параметру (который теперь `zip_file`)
         with zipfile.ZipFile(tmp_zip.name, "r") as zf:
             candidates, total_unzipped = scan_zip(zf)
             if not candidates:
@@ -200,3 +202,4 @@ async def merge_zip(
     finally:
         try: os.unlink(tmp_zip.name)
         except: pass
+
