@@ -119,3 +119,7 @@ def zipfile_is_valid(path: str) -> bool:
             return bad is None
     except:
         return False
+        
+@app.get("/status")
+async def status():
+    return {"status": "ok"}
